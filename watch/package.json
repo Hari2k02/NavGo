@@ -1,0 +1,22 @@
+{
+  "name": "navgo-watch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:interop": "node --test test/interop.case.js",
+    "check": "tsc --noEmit",
+    "build": "node tools/zeus.cjs build --ip false",
+    "zeus": "node tools/zeus.cjs",
+    "assets": "node tools/generate-assets.js"
+  },
+  "devDependencies": {
+    "@zeppos/zeus-cli": "1.7.1",
+    "@zeppos/device-types": "4.0.0",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "sharp": "0.35.4"
+  }
+}
