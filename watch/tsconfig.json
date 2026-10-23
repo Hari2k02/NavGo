@@ -1,6 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2020",
+    "lib": ["ES2020"],
     "module": "ESNext",
     "moduleResolution": "node",
     "allowJs": true,
@@ -8,7 +9,7 @@
     "noEmit": true,
     "strict": true,
     "skipLibCheck": true,
-    "types": ["@zeppos/device-types"]
+    "types": ["@zeppos/device-types", "@zeppos/zml"]
   },
-  "include": ["app.js", "page/**/*.js", "lib/**/*.js"]
+  "include": ["app.js", "page/**/*.js", "lib/**/*.js", "app-side/**/*.js", "app-settings/**/*.js", "types/**/*.d.ts"]
 }

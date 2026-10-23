@@ -11,6 +11,9 @@
     "zeus": "node tools/zeus.cjs",
     "assets": "node tools/generate-assets.js"
   },
+  "dependencies": {
+    "@zeppos/zml": "0.0.41"
+  },
   "devDependencies": {
     "@zeppos/zeus-cli": "1.7.1",
     "@zeppos/device-types": "4.0.0",

@@ -3,6 +3,6 @@
     <string name="app_name">NavGo</string>
     <string name="channel_name">Watch connection</string>
     <string name="service_title">NavGo is sharing navigation</string>
-    <string name="service_message">Local Bluetooth only. Tap to manage or stop.</string>
+    <string name="service_message">Local relay through Zepp. Tap to manage or stop.</string>
     <string name="stop">Stop</string>
 </resources>

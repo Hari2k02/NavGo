@@ -1,23 +1,25 @@
 package app.navgo;
 
-import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
-import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
+import android.util.Log;
+import app.navgo.core.LocalNavServer;
+import java.io.IOException;
 
 public final class NavigationService extends Service {
     static final String STOP = "app.navgo.STOP";
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private BleServer ble;
+    private LocalNavServer bridge;
     private final Runnable heartbeat = new Runnable() {
         @Override public void run() {
             MapsNotificationListener.refreshNow();
@@ -28,16 +30,12 @@ public final class NavigationService extends Service {
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && STOP.equals(intent.getAction())) {
             NavStore.status = "Sharing is off";
+            NavStore.enabled = false;
+            NavStore.clear();
             stopSelf();
             return START_NOT_STICKY;
         }
         if (NavStore.enabled) return START_NOT_STICKY;
-        if (Build.VERSION.SDK_INT >= 31
-            && (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
-            || checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED)) {
-            fail("Nearby devices permission is required");
-            return START_NOT_STICKY;
-        }
         NotificationManager manager = getSystemService(NotificationManager.class);
         manager.createNotificationChannel(new NotificationChannel("connection",
             getString(R.string.channel_name), NotificationManager.IMPORTANCE_LOW));
@@ -54,24 +52,35 @@ public final class NavigationService extends Service {
             .setVisibility(Notification.VISIBILITY_SECRET)
             .addAction(new Notification.Action.Builder(null, getString(R.string.stop), stop).build())
             .build();
-        if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
-        } else {
-            startForeground(1, notification);
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+            } else {
+                startForeground(1, notification);
+            }
+        } catch (IllegalStateException | SecurityException exception) {
+            fail("Android blocked background sharing. Reopen NavGo and retry.");
+            return START_NOT_STICKY;
         }
         NavStore.clear();
         NavStore.enabled = true;
-        NavStore.status = "Starting private Bluetooth link...";
-        ble = new BleServer(this, handler, this::fail);
+        NavStore.status = "Starting local Zepp relay...";
         try {
-            ble.start();
-            if (NavStore.enabled) handler.post(heartbeat);
-        } catch (SecurityException exception) {
-            fail("Bluetooth permission is missing. Grant Nearby devices access and restart.");
-        } catch (IllegalStateException exception) {
-            fail("Bluetooth is unavailable. Enable Bluetooth and restart.");
+            bridge = new LocalNavServer(new BridgeKey(this).get(), NavStore::snapshot,
+                () -> NavStore.bridgeReadAt = SystemClock.elapsedRealtime(),
+                error -> handler.post(() -> fail(error)),
+                warning -> Log.w("NavGo", warning));
+            bridge.start(LocalNavServer.PORT);
+            NavStore.status = "Ready. Open NavGo on your Zepp-connected watch.";
+            handler.post(heartbeat);
+        } catch (IOException | SecurityException exception) {
+            fail("Local relay could not start. Stop other NavGo profiles, then retry.");
         }
         return START_NOT_STICKY;
+    }
+
+    @Override public void onTimeout(int startId, int foregroundServiceType) {
+        fail("Android ended the background sharing time allowance. Reopen NavGo to restart.");
     }
 
     private void fail(String message) {
@@ -85,15 +94,10 @@ public final class NavigationService extends Service {
     @Override public void onDestroy() {
         NavStore.enabled = false;
         handler.removeCallbacksAndMessages(null);
-        try {
-            if (ble != null) ble.close();
-        } catch (SecurityException exception) {
-            NavStore.status = "Sharing stopped; Bluetooth permission was revoked.";
-        } finally {
-            NavStore.clear();
-            stopForeground(STOP_FOREGROUND_REMOVE);
-            super.onDestroy();
-        }
+        if (bridge != null) bridge.close();
+        NavStore.clear();
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        super.onDestroy();
     }
 
     @Override public IBinder onBind(Intent intent) {

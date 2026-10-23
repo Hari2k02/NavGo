@@ -1,181 +1,156 @@
 # Architecture and acceptance plan
 
-## Goals and boundaries
+## Decision
 
-Expose a useful next maneuver on the wrist while keeping route data local and
-transient. Require explicit consent and authenticated transport rather than
-making an insecure connection merely to maximize watch compatibility.
+Version 0.2.0 replaces independent BLE Central/GATT discovery with Zepp-managed
+messaging. On the test T-Rex 3 the old watch scanner did not discover the phone,
+even though a PC received the phone's advertisement. Reusing Zepp's existing
+connection avoids that discovery path; it does not itself prove compatibility.
 
 ```text
-Google Maps navigation notification
-  -> Android NotificationListenerService (Maps-only filter)
-  -> conservative parser -> in-memory current snapshot
-  -> foreground BLE GATT server (bond + explicit watch approval)
-  -> authenticated, encrypted characteristic reads
-  -> watch BLE Central -> fragment validation -> freshness state
-  -> distance / arrow / instruction / summary / haptic
+Maps notification -> Maps-only listener -> parser -> RAM snapshot
+  -> loopback-only HTTP server, authenticated with setup key
+  -> NavGo Side Service in Zepp -> official ZML request/response
+  -> watch validation/freshness state -> navigation page
 ```
 
-There is no web server, cloud endpoint, GPS permission, routing API key, phone
-side-app transport or runtime analytics SDK. Google Maps itself still calculates
-the route and controls the notification contents.
+The Nark project was architectural reference only; no unlicensed implementation
+was copied. ZML 0.0.41 is the official Apache-2.0 runtime. It requires watch API
+3.6+. Zepp handles device transport; NavGo no longer advertises, scans, maintains
+system bonds, approves Bluetooth addresses or claims independent MITM pairing.
 
-## Component responsibilities
+## Components and lifecycle
 
 | Component | Responsibility |
 |---|---|
-| `android\core\MapsParser` | Package/group filtering, Unicode cleanup, distance and conservative maneuver extraction |
-| `android\core\PacketCodec` | Bounded UTF-8 encoding and MTU-safe fragments |
-| `MapsNotificationListener` | Read only Maps extras while enabled; reconcile all active Maps notifications |
-| `NavStore` | RAM-only route and last source-verification time |
-| `NavigationService` | User-started connected-device foreground service, five-second source reconciliation, teardown |
-| `BleServer` | Advertising, approval/bond enforcement, authenticated reads and fixed transfer snapshots |
-| `TrustStore` | Private persistent watch approval and random phone discovery code, not route data |
-| `watch\lib\client.js` | Discovery, explicit selection, paired profile, reads, deadlines, retry and cleanup |
-| `watch\lib\protocol.js` | Strict framing/UTF-8/body validation, replay handling and stale-state suppression |
-| `watch\page\index.js` | Large glanceable guidance, availability status, optional display hold and haptics |
+| MapsParser | Source-package/group filtering, text cleanup, conservative maneuvers |
+| PacketCodec | Bounded, code-point-safe UTF-8 body encoding |
+| NavStore | RAM snapshot, source timestamp, relay status |
+| NavigationService | User-started data-sync foreground service and five-second source reconciliation |
+| LocalNavServer | Fixed loopback listener, bounded authenticated GET requests |
+| BridgeKey | Private 32-byte SecureRandom setup key; reset/revocation |
+| watch/lib/bridge.js | Fixed local fetch, key handling, response checks, single outstanding fetch |
+| watch/app-side | Official Zepp messaging lifecycle; generic HTTP proxy disabled after ZML initialization |
+| watch/app-settings | Validated key entry/removal; never redisplay saved key |
+| watch/lib/client.js | Watch-driven request correlation, deadlines, polling, teardown |
+| watch/page/index.js | Navigation, haptics, retry and optional one-hour screen hold |
 
-The Android UI uses a dark green background, lime emphasis, large route preview
-and explicit permission/trust actions. The round watch UI prioritizes direction
-and distance, then instruction and summary. Controls have tested bezel-safe
-geometry for the 480-pixel design; real text legibility still requires a watch.
-Long or localized text is bounded and may not fit entirely on the screen.
+Sharing starts only from an explicit user action. Stop/timeout destroys the
+listener, closes sockets, stops worker threads and clears the snapshot.
+The service uses START_NOT_STICKY with no boot receiver. Its dataSync foreground
+type has no invented Bluetooth permission prerequisite, but Android 15+'s
+six-hour-per-24-hour background allowance applies. onTimeout stops promptly.
 
-## Parsing and source freshness
+The watch requests snapshots while its page executes, at one-second ticks with
+at most one outstanding request. Close stops polling and ignores late replies.
+The Side Service has no unconditional polling/background push loop.
 
-Only `com.google.android.apps.maps` notifications are considered. The app checks
-the package before accessing extras, rejects group summaries, and generally
-requires an ongoing notification with distance or recognized navigation cues.
-Arrival has its own title-based recognition. This is deliberately best-effort:
-Google Maps notifications are not a supported routing-data API.
+Watch 0.2.2 calls `setWakeUpRelaunch({ relaunch: true })` when the navigation page
+builds. Teardown deliberately does not disable it, because screen-off can destroy
+the page. A rebuilt page creates a fresh client and displays no old guidance
+until a current response arrives. This is the documented screen-off/wake
+mechanism, not a notification-dismiss callback or a foreground lock. Notification
+interruption recovery is still a hardware gate. Zepp-only app alert filtering
+and user-controlled watch DND are documented mitigations; Android Maps
+notifications remain enabled. No automatic DND changes or relaunch-timer loop.
 
-English maneuver cues are distinguished from incidental street-name words.
-Metric/imperial distances are extracted from titles. Other-language instruction
-text can survive when a recognizable distance identifies the notification, but
-the arrow remains unknown unless the maneuver is recognized. Unsupported locales
-or layouts may produce no route at all rather than fabricated guidance.
+## Trust and request limits
 
-Source notifications are rechecked every five seconds and on notification
-events. Android marks its snapshot unavailable after more than 15 seconds
-without verification. An unchanged but still active Maps notification remains
-valid; this heartbeat verifies notification presence, **not GPS fix age or the
-correctness/freshness of Google's routing engine**.
+- Bind only to 127.0.0.1:27341, never all interfaces or a LAN address.
+- GET /v1/navigation?requestId=... requires Authorization: Bearer <setup key>.
+  The key is not placed in URLs, responses, logs or watch messages.
+- A 256-bit key is encoded as 64 lower-case hex characters and copied manually
+  into Zepp settings. Android clipboard data is marked sensitive. Reset stops
+  sharing and replaces the key; removing a Zepp copy is not global revocation.
+- Constant-time comparison precedes route access. Nonmatching Host, Origin,
+  request bodies, transfer encoding and duplicate headers are rejected.
+- Headers are capped at 4096 bytes with a two-second read deadline. Two workers
+  and four queued requests bound concurrency. Connections close after one reply.
+- Responses are no-store and contain only a bounded snapshot plus echoed ID.
+  There is no arbitrary upstream URL; ZML's generic HTTP proxy is disabled.
+- Side Service uses a 2.5-second application deadline even if native fetch
+  ignores timeout. It keeps its busy gate until the native fetch settles.
+  Thus a hung fetch needs Zepp restart but cannot accumulate new native fetches.
+- Watch messages have a four-second request timeout and reject late results,
+  mismatched request IDs, unsupported versions and malformed bodies.
 
-Each BLE transfer captures one immutable encoded snapshot. A server batch older
-than five seconds is replaced. The watch publishes only complete valid packets,
-clears guidance immediately on disconnect and suppresses a snapshot at 15 seconds
-without a complete packet. Clock regression also invalidates watch display state.
-The page checks display freshness once per second while it is executing.
+This is **bearer-key client authorization, not mutually authenticated TLS**.
+HTTP is plaintext inside the phone. Zepp, the OS, clipboard/input method and
+devices are trusted. Other local processes can attempt denial of service; a
+malicious app occupying the fixed port while NavGo is stopped could impersonate
+the endpoint and capture the key or forge guidance. Rooted/compromised devices,
+malicious installed apps and platform/vendor behavior are outside the protection
+offered here. Do not market this as equivalent to the abandoned verified-MITM
+BLE design. Do not log or publish real keys/routes during diagnosis.
 
-## Trust and transport
+## Source freshness
 
-The phone advertises the NavGo service UUID and a scan-response service-data
-value containing a random three-byte code. The watch scans for at most 15 seconds,
-keeps up to eight matching phones and requires explicit selection by code.
-The code is public, can collide and can be spoofed; it is not authentication.
+Only com.google.android.apps.maps extras are processed, and only while sharing
+is enabled. The listener checks package before reading extras, rejects group
+summaries and reconciles active notifications on events and every five seconds.
+The parser is best-effort; Google Maps notifications are not a supported routing
+data API. Unsupported layouts produce unavailable/no-route state rather than
+invented guidance.
 
-The watch requests a paired profile. Android's data characteristic requires
-`PERMISSION_READ_ENCRYPTED_MITM`; each application-level read also requires the
-currently approved address, an existing system bond and sharing to be enabled.
-Approval is distinct from bonding. Only the explicitly approved watch is served.
-Addresses are identifiers, not secrets. Transport authentication comes from the
-system's authenticated BLE bond and enforced link encryption.
+Android returns unavailable at 15 seconds without source verification. An
+unchanged active notification remains valid: this verifies notification presence,
+not GPS fix age or the correctness of Google's routing engine.
 
-The first-pairing ceremony depends on firmware supporting a real authenticated
-passkey exchange. A `pair: true` profile alone does not prove MITM protection.
-The Android stack must enforce the characteristic permission. Unsupported
-security must fail closed; do not change it to an unencrypted characteristic or
-accept Just Works pairing as an equivalent.
+The watch accepts only a response for its current request inside four seconds,
+with no backward clock movement. Errors clear its state. No cached/late reply
+may refresh guidance. A 15-second display watchdog also suppresses old guidance;
+the page checks once per second while executing. A stopped/suspended watch page
+cannot guarantee timely redraw. Stop cannot recall an already delivered packet.
 
-The watch uses the selected address only in RAM, reconnects to that selection
-with exponential backoff capped at 30 seconds, and never silently switches phone.
-Connection has a 20-second watchdog; pairing/approval errors have a two-minute
-window; individual reads have a four-second watchdog. Closing the page unregisters
-callbacks and destroys/disconnects its BLE resources.
+## Wire body, version 1
 
-No application-layer password, bespoke cryptography or key-storage scheme is
-invented. The design does not protect against a compromised phone/watch, an
-incorrectly approved device, shoulder surfing or the platform vendor's behavior.
+HTTP response: {"version":1,"requestId":"<echo>","body":"<lower-case hex>"}.
+The request ID is 1-64 lower-case ASCII letters/digits/hyphens. Watch IDs combine
+a session prefix and incrementing counter; correlation is not authentication.
 
-## Wire protocol, version 1
+The body retains the bounded format from the original implementation, without
+BLE fragment framing:
 
-Service UUID: `a8e70001-8d9b-4c2f-a51b-2e52d72f6300`.
-Read-only characteristic UUID: `a8e70002-8d9b-4c2f-a51b-2e52d72f6300`.
-No notifications, writes or long reads are used.
-
-Each read returns the next frame, at most 20 bytes, compatible with ATT MTU 23.
-
-| Frame offset | Bytes | Meaning |
-|---|---|---|
-| 0 | 1 | Magic `0x4e` |
-| 1 | 1 | Protocol version `1` |
-| 2 | 2 | Unsigned sequence, big-endian, modulo 65536 |
-| 4 | 1 | Zero-based fragment index |
-| 5 | 1 | Fragment count, 1 through 33 |
-| 6 | 1-14 | Body fragment; all nonfinal fragments use 14 bytes |
-
-Reassembled body:
-
-| Order | Encoding / encoder limit |
+| Field | Encoding/limit |
 |---|---|
-| State | One byte: IDLE=0, NAVIGATING=1, ARRIVED=2, UNAVAILABLE=3 |
-| Turn | One byte, values below |
-| Distance | UTF-8, at most 32 bytes, followed by NUL |
-| Instruction | UTF-8, at most 280 bytes, followed by NUL |
-| Summary | UTF-8, at most 144 bytes, followed by NUL |
+| State | Byte: IDLE=0, NAVIGATING=1, ARRIVED=2, UNAVAILABLE=3 |
+| Turn | Byte: UNKNOWN=0, STRAIGHT=1, LEFT=2, RIGHT=3, SLIGHT_LEFT=4, SLIGHT_RIGHT=5, SHARP_LEFT=6, SHARP_RIGHT=7, U_TURN=8, ROUNDABOUT=9, MERGE=10, EXIT=11 |
+| Distance | UTF-8, <=32 bytes, then NUL |
+| Instruction | UTF-8, <=280 bytes, then NUL |
+| Summary | UTF-8, <=144 bytes, then NUL |
 
-Turn values: UNKNOWN=0, STRAIGHT=1, LEFT=2, RIGHT=3, SLIGHT_LEFT=4,
-SLIGHT_RIGHT=5, SHARP_LEFT=6, SHARP_RIGHT=7, U_TURN=8, ROUNDABOUT=9,
-MERGE=10, EXIT=11.
+Maximum 461 body bytes / 922 hex characters. Both phone-side JavaScript and watch
+validate version, ID, enums, UTF-8, total and per-field bounds, and exactly three
+terminated fields. The Side Service also caps string responses at 2048 characters.
+Native fetch owns initial allocation; this limit is validation, not a streaming
+memory bound against an impersonated local endpoint.
 
-The body limit is 461 bytes, including state, turn and terminators. The encoder
-truncates at Unicode code-point boundaries. The decoder enforces the total body
-limit, valid UTF-8, enums and exactly three terminated fields. It rejects malformed
-headers/counts and never publishes partial, duplicate or out-of-order fragments.
-A sequence is newer than the completed sequence only when its modulo-65536 delta
-is between 1 and 32767; a fresh connection resets sequence history.
+## Physical acceptance gates
 
-Reads are spaced about 80 ms during transfer and one second after a completed
-snapshot. A maximal packet takes multiple seconds. This is responsive glanceable
-guidance, not hard real-time navigation; physical latency must be measured.
-Replay checks prevent accidental stale frame reuse within a connection and do
-not replace BLE authentication.
+Record phone/OS, watch model/firmware/API, Zepp and Maps versions, language and
+sanitized observations. Building packages is not completion of these gates.
 
-## Physical acceptance matrix - not yet executed
+On October 23, 2026, the tester confirmed key setup and live Google Maps text on
+the T-Rex 3, but reported that mirrored phone notifications displaced NavGo and
+returned to the watch face. This confirms basic forwarding, not full acceptance.
 
-Record phone/OS, watch model, firmware/API, Maps version/language, connection
-conditions and observed results. Do not collect or publish real route text in
-debug logs; use a consented test route and sanitized fixtures.
-
-| Area | Required observation before release |
+| Area | Required observation |
 |---|---|
-| Authenticated pairing | Correct passkey ceremony, usable encrypted reads, repeated connection while the normal Zepp connection is present |
-| Negative access | Unbonded, unauthenticated and bonded-but-unapproved clients cannot read route bytes; incorrect passkey fails |
-| Approval/revocation | Unknown watch not served, second watch rejected, Forget/Stop stops subsequent reads and clears phone route |
-| Real notifications | Actual Maps walking/driving layouts, distance changes, long unchanged highway maneuver, Unicode, units and unsupported locales |
-| Route lifecycle | Starting mid-route, route replacement, reroute, notification removal, ending route and arrival never leave misleading old guidance |
-| Source unavailable | Revoked listener access, stopped listener or killed phone process removes live indication within the freshness budget |
-| Connection recovery | Bluetooth off, range loss, disconnect mid-fragment, phone restart and watch-page close clear guidance; retry never switches phones |
-| Permission lifecycle | Denied/revoked Nearby devices and notification permissions produce explicit recovery guidance, not crashes |
-| Display lifecycle | Screen-off, wrist-drop, one-hour hold expiry, other watch apps and workout coexistence; document actual suspension limits |
-| Timing | Measure notification-post-to-wrist latency; proposed acceptance p95 <=5 seconds in normal connected operation; test worst-case body separately |
-| Freshness | Disconnect clears on callback; phone-source timeout plus next transfer does not exceed 20 seconds; watch packet loss clears within 16 seconds while page is running |
-| Battery/resources | Measure at least one hour with screen auto and hold, compare phone/watch baselines; proposed screen-auto incremental drain <=5 percentage points/hour on each device |
-| UI | Readable stationary and walking; long text/Unicode; controls inside bezel; no haptic repeat on distance-only heartbeat |
+| Installation | Complete 0.2.2 preview includes device, Side Service and settings; watch API >=3.6 |
+| Setup | Key entry in Zepp settings, normal Zepp pairing, guidance without NavGo scanning |
+| Local policy | Zepp native fetch reaches loopback on the tested phone; no LAN/remote fallback |
+| Auth | Missing/wrong key yields no route; reset invalidates old key; stop closes listener |
+| Notifications | Actual Maps walking/driving, start mid-route, reroute, long unchanged maneuver, arrival/removal |
+| Freshness | Stop sharing, disconnect, listener loss, malformed response and delayed reply never restore old guidance |
+| Recovery | Bluetooth off/on, Zepp killed/restarted, watch closed/reopened, phone reboot, key change |
+| Profiles | Only intended main-profile installation active; no clone port collision |
+| Background | Screen off, wrist drop, another app/workout, battery restrictions and Android foreground timeout |
+| Riding interruptions | With Zepp Maps alerts disabled, Maps updates still reach NavGo; with watch DND, test unrelated alerts and turn vibration; test return-on-wake and explicit exit separately; notification-dismiss return is not assumed |
+| Timing | Proposed p95 notification-to-wrist <=5 seconds; not measured |
+| Expiry | Proposed source-loss-to-not-live <=20 seconds and watch-only expiry <=16 seconds while executing |
+| Battery | Measure one hour screen-auto/hold; proposed incremental drain <=5 percentage points/hour per device |
+| UI | Long/localized text, bezel-safe controls, no repeated vibration on distance-only heartbeat |
 
-The timing and battery figures are **proposed acceptance thresholds, not measured
-results**. Adjust product requirements explicitly if the hardware cannot meet
-them; never weaken encryption to meet a performance target.
-
-## Subsequent phases
-
-1. Prove the direct authenticated BLE link on T-Rex 3 or reject this transport for
-   that firmware. A different transport would be a separate design decision.
-2. Capture consented notification layouts and add narrowly targeted parser tests
-   for demonstrated failures and additional locales.
-3. Measure latency/battery, validate screen lifecycle and optimize only measured
-   bottlenecks while preserving freshness and explicit error handling.
-4. Add display targets and validate each advertised watch model; do not infer
-   compatibility solely from a successful package build.
-5. Register app identities, configure release signing, review current distribution
-   policies and complete independent security/privacy review before publication.
+Timing and battery values are proposed acceptance thresholds, not measured
+results. Broader device support, signed releases and store publication require
+successful hardware acceptance and independent security/privacy review.

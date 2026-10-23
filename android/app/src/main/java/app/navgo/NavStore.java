@@ -6,8 +6,7 @@ import app.navgo.core.Navigation;
 final class NavStore {
     static volatile boolean enabled;
     static volatile String status = "Sharing is off";
-    static volatile String pendingAddress;
-    static volatile String connectedAddress;
+    static volatile long bridgeReadAt = -1;
     private static Navigation navigation = Navigation.idle();
     private static long verifiedAt = -1;
 
@@ -19,7 +18,7 @@ final class NavStore {
     }
 
     static synchronized Navigation snapshot() {
-        if (!enabled || verifiedAt < 0 || SystemClock.elapsedRealtime() - verifiedAt > 15_000) {
+        if (!enabled || verifiedAt < 0 || SystemClock.elapsedRealtime() - verifiedAt >= 15_000) {
             return Navigation.unavailable();
         }
         return navigation;
@@ -28,5 +27,6 @@ final class NavStore {
     static synchronized void clear() {
         navigation = Navigation.idle();
         verifiedAt = -1;
+        bridgeReadAt = -1;
     }
 }

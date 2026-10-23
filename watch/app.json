@@ -4,22 +4,26 @@
     "appId": 1099901,
     "appName": "NavGo",
     "appType": "app",
-    "version": { "code": 1, "name": "0.1.0" },
+    "version": { "code": 8, "name": "0.2.2" },
     "icon": "icon.png",
     "vender": "NavGo",
     "description": "Private local Google Maps navigation companion."
   },
-  "permissions": ["device:os.ble"],
+  "permissions": ["data:os.device.info"],
   "runtime": {
     "apiVersion": {
-      "compatible": "3.0.0",
-      "target": "3.0.0",
-      "minVersion": "3.0.0"
+      "compatible": "3.6.0",
+      "target": "3.6.0",
+      "minVersion": "3.6.0"
     }
   },
   "targets": {
     "trex3": {
-      "module": { "page": { "pages": ["page/index"] } },
+      "module": {
+        "page": { "pages": ["page/index"] },
+        "app-side": { "path": "app-side/index" },
+        "setting": { "path": "app-settings/index" }
+      },
       "platforms": [{ "st": "r", "sr": "w480" }],
       "designWidth": 480
     }

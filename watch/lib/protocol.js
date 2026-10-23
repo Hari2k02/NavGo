@@ -1,7 +1,18 @@
-export const SERVICE_UUID = 'a8e70001-8d9b-4c2f-a51b-2e52d72f6300'
-export const DATA_UUID = 'a8e70002-8d9b-4c2f-a51b-2e52d72f6300'
 export const MAX_BODY = 461
 export const STALE_MS = 15000
+
+/** @param {unknown} value @param {string} requestId */
+export function decodeEnvelope(value, requestId) {
+  if (!value || typeof value !== 'object' || !('version' in value) || value.version !== 1
+    || !('requestId' in value) || value.requestId !== requestId
+    || !('body' in value) || typeof value.body !== 'string' || value.body.length > MAX_BODY * 2
+    || !/^(?:[0-9a-f]{2}){5,}$/.test(value.body)) {
+    throw new Error('Invalid relay response')
+  }
+  const bytes = new Uint8Array(value.body.length / 2)
+  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(value.body.slice(i * 2, i * 2 + 2), 16)
+  return decodeBody(bytes)
+}
 
 /** @typedef {{state: number, turn: number, distance: string, instruction: string, summary: string}} Navigation */
 
@@ -18,74 +29,17 @@ export function decodeBody(bytes) {
     throw new Error('Invalid navigation body')
   }
   const fields = []
+  const limits = [32, 280, 144]
   let start = 2
   for (let i = 2; i < bytes.length; i++) {
     if (bytes[i] === 0) {
+      if (fields.length >= 3 || i - start > limits[fields.length]) throw new Error('Navigation field exceeds limit')
       fields.push(utf8(bytes.slice(start, i)))
       start = i + 1
     }
   }
   if (fields.length !== 3 || start !== bytes.length) throw new Error('Invalid navigation fields')
   return { state: bytes[0], turn: bytes[1], distance: fields[0], instruction: fields[1], summary: fields[2] }
-}
-
-export class FrameAssembler {
-  constructor() {
-    /** @type {number | null} */
-    this.sequence = null
-    this.count = 0
-    this.next = 0
-    /** @type {number[]} */
-    this.bytes = []
-    /** @type {number | null} */
-    this.completed = null
-    this.startedAt = 0
-  }
-
-  reset() {
-    this.sequence = null
-    this.count = 0
-    this.next = 0
-    this.bytes = []
-    this.completed = null
-    this.startedAt = 0
-  }
-
-  /** @param {ArrayBuffer} buffer @param {number} now @returns {Navigation | null} */
-  push(buffer, now) {
-    const frame = new Uint8Array(buffer)
-    if (frame.length < 7 || frame.length > 20 || frame[0] !== 0x4e || frame[1] !== 1) {
-      throw new Error('Invalid navigation frame')
-    }
-    const sequence = (frame[2] << 8) | frame[3]
-    const index = frame[4]
-    const count = frame[5]
-    if (count < 1 || count > 33 || index >= count || (index < count - 1 && frame.length !== 20)) {
-      throw new Error('Invalid navigation fragmentation')
-    }
-    if (index === 0) {
-      if (this.completed !== null) {
-        const delta = (sequence - this.completed + 65536) % 65536
-        if (delta === 0 || delta >= 32768) return null
-      }
-      this.sequence = sequence
-      this.count = count
-      this.next = 0
-      this.bytes = []
-      this.startedAt = now
-    }
-    if (sequence !== this.sequence || count !== this.count || index !== this.next) return null
-    if (now - this.startedAt > 5000) throw new Error('Navigation transfer timed out')
-    for (let i = 6; i < frame.length; i++) this.bytes.push(frame[i])
-    if (this.bytes.length > MAX_BODY) throw new Error('Navigation packet exceeds limit')
-    this.next++
-    if (this.next !== this.count) return null
-    const result = decodeBody(new Uint8Array(this.bytes))
-    this.completed = sequence
-    this.sequence = null
-    this.bytes = []
-    return result
-  }
 }
 
 export class NavigationState {
